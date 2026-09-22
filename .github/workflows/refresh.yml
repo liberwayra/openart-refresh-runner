@@ -1,0 +1,65 @@
+name: weekly-openart-refresh
+
+on:
+  schedule:
+    # Mondays 09:00 UTC (= Mon 01:00 America/Los_Angeles)
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      time_budget:
+        description: "refresh.sh total time budget (seconds)"
+        default: "1500"
+        required: false
+        type: string
+
+concurrency:
+  group: openart-refresh
+  cancel-in-progress: true
+
+# This public repo is only the CI HOST. All logic + data live in private
+# repos pulled at runtime with the GH_PAT secret. This file intentionally
+# contains no secrets.
+permissions:
+  contents: write # heartbeat commit to this repo (keeps the cron alive)
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4 # this runner repo (tiny)
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Pull CI logic (private openart-refresh)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          rm -rf logic
+          git clone -q "https://x-access-token:${GH_PAT}@github.com/liberwayra/openart-refresh.git" logic
+
+      - name: Install scraper deps
+        run: pip install "httpx>=0.27"
+
+      - name: Run OpenArt catalog refresh
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          OPENART_COOKIE: ${{ secrets.OPENART_COOKIE }}
+          TIME_BUDGET: ${{ inputs.time_budget || '1500' }}
+        run: bash logic/scripts/ci_refresh.sh
+
+      - name: Write state heartbeat (keeps schedule alive + visibility)
+        run: |
+          git config user.name "openart-refresh-bot"
+          git config user.email "bot@users.noreply.github.com"
+          mkdir -p state
+          if [ -f /tmp/refresh_summary.json ]; then cp /tmp/refresh_summary.json state/last_refresh.json; fi
+          if ! git diff --quiet state/ 2>/dev/null && [ -f state/last_refresh.json ]; then
+            git add state/last_refresh.json
+            git commit -m "chore: refresh heartbeat $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          else
+            echo "No state change to commit"
+          fi
